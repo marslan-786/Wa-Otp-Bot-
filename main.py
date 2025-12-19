@@ -6,16 +6,17 @@ import os
 from datetime import datetime
 from neonize.client import NewClient
 from neonize.events import MessageEv, ConnectedEv
+from neonize.proto.Neonize_pb2 import MessageServerID
+from neonize.utils.enum import ReceiptType
 from apscheduler.schedulers.background import BackgroundScheduler
 from settings import CONFIG
 
-# --- فنکشن: کنٹری کوڈ کو ایموجی جھنڈے میں بدلنے کے لیے ---
+# --- فنکشن: کنٹری فلیگ لاجک ---
 def get_emoji_flag(country_code):
     if not country_code: return "🌐"
     offset = 127397
     return "".join(chr(ord(c.upper()) + offset) for c in country_code)
 
-# --- کنٹری فلیگ لاجک (pycountry استعمال کرتے ہوئے) ---
 def get_country_info(raw_country_str):
     country_name = raw_country_str.split(' ')[0]
     try:
@@ -26,53 +27,46 @@ def get_country_info(raw_country_str):
     except:
         return "🌐", f"🌐 {country_name}"
 
-# --- او ٹی پی نکالنے کا فنکشن ---
 def extract_otp(message):
-    # میسج میں سے ہندسے (جیسے 625-266 یا 454381) تلاش کریں
     match = re.search(r'\b\d{3,4}[-\s]?\d{3,4}\b|\b\d{4,8}\b', message)
     return match.group(0) if match else "N/A"
 
-# --- نمبر ماسک کرنے کا فنکشن ---
 def mask_number(number):
     if not number: return "N/A"
     return f"{number[:5]}XXXX{number[-2:]}"
 
 last_processed_ids = set()
 
-# --- OTP مانیٹرنگ کی مین لاجک ---
+# --- OTP بھیجنے کا فنکشن (بٹنز کے ساتھ) ---
+def send_otp_with_buttons(client: NewClient, chat_id, body, otp_text):
+    # یہاں ہم واٹس ایپ کے بٹنز (Native Flow) استعمال کر رہے ہیں
+    # نوٹ: بٹنز کچھ واٹس ایپ ورژن پر شو نہیں ہوتے، اس لیے لنک ٹیکسٹ میں بھی موجود ہے
+    buttons = [
+        {"name": "cta_copy", "buttonParamsJson": '{"display_text":"Copy OTP","id":"123","copy_code":"' + otp_text + '"}'},
+        {"name": "cta_url", "buttonParamsJson": '{"display_text":"Join Group","url":"https://chat.whatsapp.com/EbaJKbt5J2T6pgENIeFFht"}'}
+    ]
+    client.send_message(chat_id, body) # فی الحال سادہ میسج بھیج رہا ہوں کیونکہ نان بزنس پر بٹنز بلاک ہو رہے ہیں
+
+# --- OTP مانیٹرنگ لوپ ---
 def check_otp_apis(client: NewClient):
     global last_processed_ids
-    
     for url in CONFIG['otp_api_urls']:
         try:
             api_name = "API 1" if "railway" in url else "API 2"
             response = requests.get(url, timeout=10)
             data = response.json()
-            
-            # API کے 'aaData' کو پراسیس کرنا
             records = data.get('aaData', [])
-            
             for row in records:
                 if len(row) < 5: continue
-                
-                # یونیک آئی ڈی (نمبر + وقت) تاکہ پرانا میسج دوبارہ نہ جائے
                 msg_id = f"{row[2]}_{row[0]}" 
-                
                 if msg_id not in last_processed_ids:
-                    raw_time = row[0]
-                    country_info = row[1]
-                    phone_number = row[2]
-                    service_name = row[3]
-                    full_msg = row[4]
-                    
+                    raw_time, country_info, phone_number, service_name, full_msg = row[0], row[1], row[2], row[3], row[4]
                     c_flag, country_with_flag = get_country_info(country_info)
                     masked_num = mask_number(phone_number)
                     otp_code = extract_otp(full_msg)
-                    service_title = service_name.upper()
-
-                    # 🔥 آپ کی بتائی ہوئی "سیم ٹو سیم" باڈی
+                    
                     otp_message_body = f"""
-✨ *{c_flag} | {service_title} New Message Received {api_name}*⚡
+✨ *{c_flag} | {service_name.upper()} New Message Received {api_name}*⚡
 
 > ⏰   *`Time`   •   _{raw_time}_*
 
@@ -98,53 +92,45 @@ def check_otp_apis(client: NewClient):
 > `😎SK~SuFyAn😎` `😈SUDAIS~Ahmed👿`
                     """.strip()
 
-                    # تمام چینلز پر میسج بھیجنا
                     for channel in CONFIG['otp_channel_ids']:
-                        try:
-                            client.send_message(channel, otp_message_body)
-                        except Exception as e:
-                            print(f"Failed to send to {channel}: {e}")
+                        client.send_message(channel, otp_message_body)
                     
                     last_processed_ids.add(msg_id)
-                    # میموری بچانے کے لیے پرانا ڈیٹا صاف کریں
                     if len(last_processed_ids) > 500: last_processed_ids.clear()
-                    
         except Exception as e:
-            print(f"❌ API Error ({url}): {e}")
+            print(f"❌ API Error: {e}")
 
-# --- بوٹ ایونٹ ہینڈلرز ---
-def on_connected(client: NewClient, _: ConnectedEv):
-    print(f"✅ {CONFIG['bot_name']} is Connected!")
-    # شیڈولر شروع کریں
+# --- ایونٹ ہینڈلرز (Corrected Syntax) ---
+client = NewClient("kami_session.db")
+
+@client.event(ConnectedEv)
+def on_connected(_: NewClient, __: ConnectedEv):
+    print(f"✅ {CONFIG['bot_name']} Connected Successfully!")
     scheduler = BackgroundScheduler()
     scheduler.add_job(check_otp_apis, 'interval', seconds=CONFIG['monitor_interval'], args=[client])
     scheduler.start()
 
+@client.event(MessageEv)
 def on_message(client: NewClient, message: MessageEv):
     msg_text = message.Message.conversation or message.Message.extendedTextMessage.text
-    if msg_text == ".id":
-        client.reply_message(message, f"Chat ID: {message.Info.MessageSource.Chat}")
-
-# --- مین اسٹارٹ اپ ---
-def start_bot():
-    # سیشن فائل کا نام
-    client = NewClient("kami_otp_session.db")
+    chat_id = message.Info.MessageSource.Chat
     
-    client.event_handler(ConnectedEv)(on_connected)
-    client.event_handler(MessageEv)(on_message)
+    # 1. .id کمانڈ
+    if msg_text == ".id":
+        client.reply_message(message, f"📍 *Chat ID:* `{chat_id}`")
 
-    # اگر پہلے سے لاگ ان نہیں ہے تو پیرنگ کوڈ مانگے
+    # 2. .chk کمانڈ (بٹنز ٹیسٹنگ)
+    elif msg_text == ".chk" or msg_text == ".check":
+        test_body = "🧪 *Testing WhatsApp Buttons Styles* ⚡"
+        # ہم یہاں ٹیکسٹ کے ساتھ لنکس بھیج رہے ہیں کیونکہ واٹس ایپ کے نئے رولز میں بٹنز صرف بزنس پیغامات میں مستحکم ہیں
+        client.reply_message(message, test_body + "\n\n1. Copy OTP: `123456` (Click to copy)\n2. Group: https://chat.whatsapp.com/EbaJKbt5J2T6pgENIeFFht")
+
+def start_bot():
     if not client.is_registered():
-        print(f"\n⏳ Requesting Pairing Code for: {CONFIG['owner_number']}")
+        print(f"⏳ Pairing for: {CONFIG['owner_number']}")
         time.sleep(5)
-        try:
-            code = client.pair_code(CONFIG['owner_number'])
-            print(f"\n================================")
-            print(f"✅ YOUR PAIRING CODE: \033[1;32m{code}\033[0m")
-            print(f"================================\n")
-        except Exception as e:
-            print(f"Pairing Error: {e}")
-
+        code = client.pair_code(CONFIG['owner_number'])
+        print(f"\n🔑 PAIRING CODE: \033[1;32m{code}\033[0m\n")
     client.connect()
 
 if __name__ == "__main__":
