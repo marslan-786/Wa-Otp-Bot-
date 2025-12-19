@@ -1,0 +1,6 @@
+neonize
+requests
+pycountry
+flag
+APScheduler
+python-magic-bin
